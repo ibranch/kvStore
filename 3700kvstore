@@ -17,8 +17,8 @@ sock.connect(my_id)
 
 lastClock, currentTerm, commitIndex, lastApplied = 0
 candidate = False
-leader_id = my_id
-votedFor = None
+leader_id = None
+votedFor = (None, None) # (term, id)
 votesForMe = []
 log = []
 stateMachine = {}
@@ -56,17 +56,21 @@ def RequestVote():
 
 
 def VoteRequested(term, candidateId, logLength, lastLogTerm):
-    global votedFor, leader_id
+    global votedFor, leader_id, currentTerm
     message = json.dumps({'src': my_id,
                           'dest': candidateId,
                           'leader': leader_id,
                           'type': 'vote'})
-    # if we vote for the candidate:
-    message['vote'] = True
-    votedFor = candidateId
+    if term < currentTerm:
+      message['vote'] = False
+    else:
+      if votedFor[0] is not currentTerm or votedFor[1] == candidateId:
+        message['vote'] = True
+        votedFor = (currentTerm, candidateId)
+      else:
+        message['vote'] = False
 
-    # if we don't vote for the candidate:
-    message['vote'] = False
+    sock.send(message)
 
 
 def get(msg):
