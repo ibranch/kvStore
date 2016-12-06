@@ -31,40 +31,62 @@ def sendToAll(message):
         sock.send(message)
 
 
-def sendAppendEntries(prevLogIndex, prevLogTermEntries, leaderCommit):
-    global my_id
+def sendAppendEntries(prevLogIndex, prevLogTermEntries, entries=None):
+    global my_id, lastClock, commitIndex
+    lastClock = time.time()
     message = json.dumps({'src': my_id,
+                          'term': currentTerm,
                           'type': 'append',
                           'prevLogIndex:': prevLogIndex,
+                          'entries': entries,
                           'prevLogTermEntries': prevLogTermEntries,
-                          'leaderCommit': leaderCommit})
+                          'leaderCommit': commitIndex})
 
     sendToAll(message)
 
-def Heartbeat():
-    global lastClock
-    lastClock = time.time()
-    sendAppendEntries(None, None, None)
 
+def AppendEntries(term, leaderId, prevLogIndex, prevLogTermEntries, leaderCommit, entries):
+    global lastClock, votesForMe, candidate, leader_id, currentTerm, log, commitIndex
 
-def AppendEntries(term, leaderId, prevLogIndex, prevLogTermEntries, leaderCommit):
-    global lastClock, votesForMe, candidate, leader_id, currentTerm
+    msg = {'src': my_id, 'type': 'ack', 'dst': leader_id}
     # Listen to your
     lastClock = time.time() # This is ONLY updated on vote requests and heartbeats
     leader_id = leaderId
     # When it's calling for yooooou
-    if term >= currentTerm and candidate:
+    if prevLogTermEntries >= currentTerm and candidate:
         # transition out of the candidate state, if we were in it
         votesForMe = []
         candidate = False
 
-    if currentTerm < term:
+    #the leader is behind the follower
+    if term < currentTerm:
+        msg['value'] = False
+    else:
+        # terms are the same
+        try:
+            if log[prevLogIndex][0] != prevLogTermEntries:
+                log = log[:prevLogIndex]
+            log.append(entries)
+            msg['value'] = True
+
+            if leaderCommit > commitIndex:
+                commitIndex = min(leaderCommit, len(log) - 1)
+
+        except ValueError:
+            # the leader is ahead of the follower
+            msg['value'] = False
+
+    if term > currentTerm:
         currentTerm = term
 
-    # OK now here's the actual logic for appending entries
-    if prevLogIndex is None:
-        # Received heartbeat, just to update lastClock which is done above
-        return
+    try:
+        msg['term'] = currentTerm if msg['value'] else log[len(log)-1][0]
+    except ValueError:
+        msg['term'] = 0
+
+    sock.send(json.dumps(msg))
+
+
 
 
 def RequestVote():
@@ -129,23 +151,26 @@ def get(msg):
 
 def put(msg):
     global my_id, leader_id, log, stateMachine
-    src = msg['src']
-    MID = msg['MID']
-    key = msg['key']
-    message = json.dumps({'src': my_id,
-                          'dst': src,
-                          'leader': leader_id,
-                          'MID': MID})
+    # src = msg['src']
+    # MID = msg['MID']
+    # key = msg['key']
+    # message = json.dumps({'src': my_id,
+    #                       'dst': src,
+    #                       'leader': leader_id,
+    #                       'MID': MID})
 
     if leader_id != my_id:
         message['type'] = 'redirect'
     else:
         # I am the leader!
+        prevLogIndex = len(log) - 1
+        prevLogIndexTerm = 0
+
+        if prevLogIndex != -1:
+            prevLogIndexTerm = log[prevLogIndex][0]
+
         log.append((currentTerm, msg))
-
-        pass #TODO figure out all the state machine vs log shit
-
-    sock.send(message)
+        sendAppendEntries(prevLogIndex, prevLogIndexTerm)
 
 
 while True:
@@ -164,7 +189,7 @@ while True:
                 votesForMe.append(msg['src'])
             if len(votesForMe) >= (len(replica_ids) / 2):
                 # Look at me. I am the leader now.
-                Heartbeat()
+                sendAppendEntries()
                 candidate = False
                 votesForMe = []
                 leader_id = my_id
@@ -177,12 +202,14 @@ while True:
         elif msg['type'] == 'election':
             VoteRequested(msg['term'], msg['src'], msg['logLength'], msg['lastLogTerm'])
         elif msg['type'] == 'append':
-            AppendEntries(msg['term'], msg['src'], msg['prevLogIndex'], msg['prevLogTermEntries'], msg['leaderCommit'])
+            AppendEntries(msg['term'], msg['src'], msg['prevLogIndex'], msg['prevLogTermEntries'], msg['leaderCommit'], msg['entries'])
+        elif msg['type'] == 'ack':
+            CommitEntry()
 
     # Leader
     if leader_id == my_id:
         if lastClock - time.time() > HEARTBEAT_TIMEOUT:
-            Heartbeat()
+            sendAppendEntries(None, None)
         else:
             # This is calls to append entries
             # TODO implement all that stuff
