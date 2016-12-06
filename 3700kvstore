@@ -3,6 +3,7 @@
 import sys, socket, select, time, json, random
 
 ELECTION_TIMEOUT = float(random.randrange(150, 300)) / 1000 # Convert to ms
+HEARTBEAT_TIMEOUT = .140
 
 # Your ID number
 my_id = sys.argv[1]
@@ -18,148 +19,175 @@ sock.connect(my_id)
 lastClock, currentTerm, commitIndex, lastApplied = 0
 candidate = False
 leader_id = None
-votedFor = (None, None) # (term, id)
+votedFor = (-1, None) # (term, id)
 votesForMe = []
 log = []
 stateMachine = {}
 
+def sendToAll(message):
+  global replica_ids
+  for server in replica_ids:
+    message['dst'] = server
+    sock.send(message)
+
+def sendAppendEntries(prevLogIndex, prevLogTermEntries, leaderCommit):
+  global my_id
+  message = json.dumps({'src': my_id,
+                        'type': 'append',
+                        'prevLogIndex:': prevLogIndex,
+                        'prevLogTermEntries': prevLogTermEntries,
+                        'leaderCommit': leaderCommit})
+
+  sendToAll(message)
+
 def Heartbeat():
-    # TODO this is just a wrapper for a call to AppendEntries with no new info
-    pass
+  global lastClock
+  lastClock = time.time()
+  sendAppendEntries(None, None, None)
+
 
 def AppendEntries(term, leaderId, prevLogIndex, prevLogTermEntries, leaderCommit):
-    global lastClock, votesForMe, candidate, leader_id
-    # Listen to your
-    lastClock = time.time() # This is ONLY updated on vote requests and heartbeats
-    leader_id = leaderId
-    # When it's calling for yooooou
-    if term >= currentTerm and candidate:
-        # transition out of the candidate state, if we were in it
-        votesForMe = []
-        candidate = False
+  global lastClock, votesForMe, candidate, leader_id, currentTerm
+  # Listen to your
+  lastClock = time.time() # This is ONLY updated on vote requests and heartbeats
+  leader_id = leaderId
+  # When it's calling for yooooou
+  if term >= currentTerm and candidate:
+    # transition out of the candidate state, if we were in it
+    votesForMe = []
+    candidate = False
+
+  if currentTerm < term:
+    currentTerm = term
+
+  # OK now here's the actual logic for appending entries
+  if prevLogIndex is None:
+    # Received heartbeat, just to update lastClock which is done above
+    return
 
 
 def RequestVote():
-    global lastClock, candidate, votedFor, votesForMe, leader_id
-    lastClock = time.time() # This is ONLY updated on vote requests and heartbeats
-    candidate = True
-    votedFor = my_id
-    votesForMe = [my_id]
-    message = json.dumps({'src': my_id,
-                          'dest': 'FFFF',
-                          'leader': leader_id,
-                          'type': 'election',
-                          'term': currentTerm,
-                          'logLength': len(log),
-                          'lastLogTerm': log[len(log) - 1][0]})
-    sock.send(message)
+  global lastClock, candidate, votedFor, votesForMe, leader_id
+  lastClock = time.time() # This is ONLY updated on vote requests and heartbeats
+  candidate = True
+  votedFor = my_id
+  votesForMe = [my_id]
+  message = json.dumps({'src': my_id,
+                        'leader': leader_id,
+                        'type': 'election',
+                        'term': currentTerm,
+                        'logLength': len(log),
+                        'lastLogTerm': log[len(log) - 1][0]})
+
+  sendToAll(message)
 
 
 def VoteRequested(term, candidateId, logLength, lastLogTerm):
-    global votedFor, leader_id, currentTerm
-    message = json.dumps({'src': my_id,
-                          'dest': candidateId,
-                          'leader': leader_id,
-                          'type': 'vote'})
-    if term < currentTerm:
-      message['vote'] = False
+  global votedFor, leader_id, currentTerm
+  message = json.dumps({'src': my_id,
+                        'dst': candidateId,
+                        'leader': leader_id,
+                        'type': 'vote'})
+  if term < currentTerm or votedFor[0] > term:
+    message['vote'] = False
+  else:
+    if votedFor[0] is not term or votedFor[1] == candidateId:
+      message['vote'] = True
+      votedFor = (term, candidateId)
     else:
-      if votedFor[0] is not currentTerm or votedFor[1] == candidateId:
-        message['vote'] = True
-        votedFor = (currentTerm, candidateId)
-      else:
-        message['vote'] = False
+      message['vote'] = False
 
-    sock.send(message)
+  if currentTerm < term:
+    currentTerm = term
+
+  sock.send(message)
 
 
 def get(msg):
-    global my_id, leader_id, stateMachine
-    src = msg['src']
-    MID = msg['MID']
-    key = msg['key']
-    message = json.dumps({'src': my_id,
-                          'dst': src,
-                          'leader': leader_id,
-                          'MID': MID})
+  global my_id, leader_id, stateMachine
+  src = msg['src']
+  MID = msg['MID']
+  key = msg['key']
+  message = json.dumps({'src': my_id,
+                        'dst': src,
+                        'leader': leader_id,
+                        'MID': MID})
 
-    if leader_id != my_id:
-        message['type'] = 'redirect'
-    else:
-        # I am the leader!
-        try:
-            value = stateMachine[key]
-            message['value'] = value
-        except KeyError:
-            message['value'] = ''
+  if leader_id != my_id:
+    message['type'] = 'redirect'
+  else:
+    # I am the leader!
+    try:
+      value = stateMachine[key]
+      message['value'] = value
+    except KeyError:
+      message['value'] = ''
 
-    sock.send(message)
+  sock.send(message)
 
 
 def put(msg):
-    global my_id, leader_id
+  global my_id, leader_id, log, stateMachine
+  src = msg['src']
+  MID = msg['MID']
+  key = msg['key']
+  message = json.dumps({'src': my_id,
+                        'dst': src,
+                        'leader': leader_id,
+                        'MID': MID})
+
+  if leader_id != my_id:
+    message['type'] = 'redirect'
+  else:
+    # I am the leader!
     log.append((currentTerm, msg))
-    src = msg['src']
-    MID = msg['MID']
-    key = msg['key']
-    message = json.dumps({'src': my_id,
-                          'dst': src,
-                          'leader': leader_id,
-                          'MID': MID})
+    pass #TODO figure out all the state machine vs log shit
 
-    if leader_id != my_id:
-        message['type'] = 'redirect'
-    else:
-        # I am the leader!
-        pass #TODO figure out all the state machine vs log shit
-
-    sock.send(message)
+  sock.send(message)
 
 
 while True:
-    ready = select.select([sock], [], [], 0.1)[0]
+  ready = select.select([sock], [], [], 0.1)[0]
 
-    if sock in ready:
-        msg_raw = sock.recv(32768)
+  if sock in ready:
+    msg_raw = sock.recv(32768)
 
-        if len(msg_raw) == 0: continue
-        msg = json.loads(msg_raw)
+    if len(msg_raw) == 0: continue
+    msg = json.loads(msg_raw)
 
-        # Leader
-        if leader_id == my_id:
-            # This is calls to append entries
-            # TODO implement all that stuff
-            message = json.dumps({'src': my_id,
-                                  'dest': 'FFFF',
-                                  'prevLogIndex': NotImplemented,
-                                  'prevLogTermEntries': NotImplemented,
-                                  'leaderCommit': NotImplemented})
-            sock.send(message)
+    # Candidate
+    if candidate:
+      if msg['type'] == 'vote' and msg['vote']:
+        #  Vote for Pedro!
+        votesForMe.append(msg['src'])
+      if len(votesForMe) >= (len(replica_ids) / 2):
+        # Look at me. I am the leader now.
+        Heartbeat()
+        candidate = False
+        votesForMe = []
+        leader_id = my_id
 
-        # Candidate
-        if candidate:
-            if msg['type'] == 'vote' and msg['vote']:
-                #  Vote for Pedro!
-                votesForMe.append(msg['src'])
-            if len(votesForMe) >= (len(replica_ids) / 2):
-                # Look at me. I am the leader now.
-                Heartbeat()
-                candidate = False
-                votesForMe = []
-                leader_id = my_id
+    # Follower
+    if msg['type'] == 'get':
+      get(msg)
+    elif msg['type'] == 'put':
+      put(msg)
+    elif msg['type'] == 'election':
+      VoteRequested(msg['term'], msg['src'], msg['logLength'], msg['lastLogTerm'])
+    elif msg['type'] == 'append':
+      AppendEntries(msg['term'], msg['src'], msg['prevLogIndex'], msg['prevLogTermEntries'], msg['leaderCommit'])
 
-        # Follower
-        if msg['type'] == 'get':
-            get(msg)
-        elif msg['type'] == 'put':
-            put(msg)
-        elif msg['type'] == 'election':
-            VoteRequested(msg['term'], msg['src'], msg['logLength'], msg['lastLogTerm'])
-        elif msg['type'] == 'append':
-            AppendEntries(msg['term'], msg['src'], msg['prevLogIndex'], msg['prevLogTermEntries'], msg['leaderCommit'])
+  # Leader
+  if leader_id == my_id:
+    if lastClock - time.time() > HEARTBEAT_TIMEOUT:
+      Heartbeat()
+    else:
+      # This is calls to append entries
+      # TODO implement all that stuff
+      sendAppendEntries(NotImplemented, NotImplemented, NotImplemented)
 
-    clock = time.time()
-    if clock - lastClock > ELECTION_TIMEOUT:
-        # Initiate an election
-        currentTerm += 1
-        RequestVote()
+  clock = time.time()
+  if clock - lastClock > ELECTION_TIMEOUT:
+    # Initiate an election
+    currentTerm += 1
+    RequestVote()
