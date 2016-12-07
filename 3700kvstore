@@ -28,6 +28,8 @@ stateMachine = {}
 replicaCommitIndexes = {} # followerId : index
 
 
+print 'repilica : %s, timeout : %s' % (my_id, ELECTION_TIMEOUT)
+
 for id in replica_ids:
     replicaCommitIndexes[id] = -1
 
@@ -45,7 +47,6 @@ def commit(data):
 
 def sendAppendEntries(prevLogIndex, prevLogTermEntries, entries=None, dst=None):
     global my_id, lastClock, commitIndex
-    lastClock = time.time()
     message = {
         'src': my_id,
         'leader': leader_id,
@@ -62,6 +63,8 @@ def sendAppendEntries(prevLogIndex, prevLogTermEntries, entries=None, dst=None):
     else:
         message['dst'] = dst
         sock.send(json.dumps(message))
+    lastClock = time.time()
+
 
 def sendMessageToClient(data, type):
     global my_id, leader_id
@@ -75,10 +78,12 @@ def sendMessageToClient(data, type):
 
 def AppendEntries(term, leaderId, prevLogIndex, prevLogTermEntries, leaderCommit, entries):
     global lastClock, votesForMe, candidate, leader_id, currentTerm, log, commitIndex, lastApplied
+
     msg = {'src': my_id, 'type': 'ack', 'dst': leader_id, 'leader': leader_id}
-    # Listen to your
-    lastClock = time.time() # This is ONLY updated on vote requests and heartbeats
-    leader_id = leaderId
+
+
+    if (leaderCommit > commitIndex):
+        leader_id = leaderId
     # When it's calling for yooooou
     if prevLogTermEntries >= currentTerm and candidate:
         # transition out of the candidate state, if we were in it
@@ -122,6 +127,7 @@ def AppendEntries(term, leaderId, prevLogIndex, prevLogTermEntries, leaderCommit
         msg['term'] = 0
     msg['index'] = lastApplied
     msg['heartbeat'] = len(entries) == 0
+    lastClock = time.time()
     sock.send(json.dumps(msg))
 
 
@@ -130,6 +136,10 @@ def GetAck(followerId, followerIndex, followerTerm, success, heartbeat):
     if success:
         replicaCommitIndexes[followerId] = followerIndex
         if not heartbeat and replicaCommitIndexes.values().count(followerIndex) > len(replicaCommitIndexes) / 2:
+            if followerIndex > lastApplied:
+                print followerIndex
+                print lastApplied
+
             data = log[followerIndex][1]
 
             try:
@@ -145,6 +155,7 @@ def GetAck(followerId, followerIndex, followerTerm, success, heartbeat):
 
 def RequestVote():
     global lastClock, candidate, votedFor, votesForMe, leader_id
+
     leader_id = my_id
     candidate = True
     votedFor = my_id
@@ -160,6 +171,7 @@ def RequestVote():
                           'logLength': len(log),
                           'lastLogTerm': lastLogTerm}
 
+
     sendToAll(message)
 
 
@@ -171,10 +183,10 @@ def VoteRequested(term, candidateId, logLength, lastLogTerm):
     if term < currentTerm or votedFor[0] > term:
         message['vote'] = False
     else:
-        if votedFor[0] is not term or votedFor[1] == candidateId:
+        if votedFor[0] < term or (votedFor[1] == candidateId and votedFor[0] == currentTerm):
             message['vote'] = True
             leader_id = candidateId
-            lastClock = time.time()  # This is ONLY updated on vote requests and heartbeats
+            lastClock = time.time()
             votedFor = (term, candidateId)
         else:
             message['vote'] = False
@@ -231,6 +243,11 @@ def put(msg):
 
 
 while True:
+    # Leader
+    if leader_id == my_id:
+        if time.time() - lastClock > HEARTBEAT_TIMEOUT:
+            sendAppendEntries(lastApplied, currentTerm, entries=[])
+
     ready = select.select([sock], [], [], 0.1)[0]
 
     if sock in ready:
@@ -241,14 +258,16 @@ while True:
 
         # Candidate
         if candidate:
-            if msg['type'] == 'vote' and msg['vote']:
+            if msg['type'] == 'vote' and msg['vote'] and msg['src'] not in votesForMe:
                 #  Vote for Pedro!
                 votesForMe.append(msg['src'])
-            if len(votesForMe) >= (len(replica_ids) / 2):
+            if len(votesForMe) >= (len(replica_ids) + 1 / 2):
                 # Look at me. I am the leader now.
+                print '%s has won the election for term %s with votes from %s' % (my_id, currentTerm, votesForMe)
                 sendAppendEntries(lastApplied, currentTerm, entries=[])
                 candidate = False
                 votesForMe = []
+                continue
 
         # Follower
         if msg['type'] == 'get':
@@ -262,12 +281,7 @@ while True:
         elif msg['type'] == 'ack':
             GetAck(msg['src'], msg['index'], msg['term'], msg['value'], msg['heartbeat'])
 
-    # Leader
-    if leader_id == my_id:
-        if lastClock - time.time() > HEARTBEAT_TIMEOUT:
-            sendAppendEntries(lastApplied, currentTerm, entries=[])
-
-    if time.time() - lastClock > ELECTION_TIMEOUT:
+    if time.time() - lastClock > ELECTION_TIMEOUT and my_id != leader_id:
         # Initiate an election
         currentTerm += 1
         lastClock = time.time()  # This is ONLY updated on vote requests and heartbeats
