@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 
-import sys, socket, select, time, json, random
+import sys, socket, select, time, json, random, math
+from math import ceil
 
 ELECTION_TIMEOUT = float(random.randrange(150, 300)) / 1000 # Convert to ms
-HEARTBEAT_TIMEOUT = .01
+HEARTBEAT_TIMEOUT = .05
+FOLLOWER_TIMEOUT = 1
 
 # Your ID number
 my_id = sys.argv[1]
@@ -16,22 +18,20 @@ replica_ids = sys.argv[2:]
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
 sock.connect(my_id)
 
-currentTerm = commitIndex = 0
-lastClock = time.time()
+currentTerm = 0
 lastApplied = -1
+commitIndex = -1
+lastClock = time.time()
 candidate = False
 leader_id = None
 votedFor = (-1, None) # (term, id)
 votesForMe = []
 log = []
+readyToSend = []
 stateMachine = {}
-replicaCommitIndexes = {} # followerId : index
 
-
-print 'repilica : %s, timeout : %s' % (my_id, ELECTION_TIMEOUT)
-
-for id in replica_ids:
-    replicaCommitIndexes[id] = -1
+nextIndex = {}
+matchIndex = {}
 
 def sendToAll(message):
     global replica_ids
@@ -39,30 +39,70 @@ def sendToAll(message):
         message['dst'] = server
         sock.send(json.dumps(message))
 
+
+def initialIndexes():
+    global nextIndex, matchIndex
+    for id in replica_ids:
+        nextIndex[id] = len(log)
+        matchIndex[id] = -1
+
+
+def lastLog():
+    return len(log) - 1
+
+
 def commit(data):
-    global commitIndex
     stateMachine[data['key']] = data['value']
-    commitIndex += 1
     sendMessageToClient(data, 'ok')
 
-def sendAppendEntries(prevLogIndex, prevLogTermEntries, entries=None, dst=None):
-    global my_id, lastClock, commitIndex
+
+def followerCommit(leaderCommit):
+    global commitIndex
+    commitIndex = min(leaderCommit, lastLog())
+    data = log[commitIndex][1]
+    stateMachine[data['key']] = data['value']
+
+
+def sendAppendEntries(dst=None):
+    global my_id,lastClock,lastApplied,nextIndex, matchIndex
     message = {
         'src': my_id,
         'leader': leader_id,
         'term': currentTerm,
         'type': 'append',
-        'prevLogIndex': prevLogIndex,
-        'entries': entries,
-        'prevLogTermEntries': prevLogTermEntries,
+        'leaderCommit': commitIndex
+    }
+    if not dst:
+        for followerId in replica_ids:
+            message['dst'] = followerId
+            message['entries'] = log[nextIndex[followerId]:]
+            if len(message['entries']) > 3:
+                message['entries'] = message['entries'][:3]
+            message['prevLogIndex'] = matchIndex[followerId]
+            message['prevLogTerm'] = log[matchIndex[followerId]][0]
+            sock.send(json.dumps(message))
+    else:
+        message['dst'] = dst
+        message['entries'] = log[nextIndex[dst]:]
+        if len(message['entries']) > 3:
+            message['entries'] = message['entries'][:3]
+        message['prevLogIndex'] = matchIndex[dst]
+        message['prevLogTerm'] = log[matchIndex[dst]][0]
+        sock.send(json.dumps(message))
+    lastClock = time.time()
+
+
+def sendHeartbeat():
+    global my_id, lastClock, lastApplied, nextIndex, matchIndex
+    message = {
+        'src': my_id,
+        'leader': my_id,
+        'term': currentTerm,
+        'type': 'heartbeat',
         'leaderCommit': commitIndex
     }
 
-    if not dst:
-        sendToAll(message)
-    else:
-        message['dst'] = dst
-        sock.send(json.dumps(message))
+    sendToAll(message)
     lastClock = time.time()
 
 
@@ -76,114 +116,136 @@ def sendMessageToClient(data, type):
                'leader': leader_id}
     sock.send(json.dumps(message))
 
-def AppendEntries(term, leaderId, prevLogIndex, prevLogTermEntries, leaderCommit, entries):
-    global lastClock, votesForMe, candidate, leader_id, currentTerm, log, commitIndex, lastApplied
-
-    msg = {'src': my_id, 'type': 'ack', 'dst': leader_id, 'leader': leader_id}
-
-
-    if (leaderCommit > commitIndex):
+def AppendEntries(term, leaderId, prevLogIndex, prevLogTerm, leaderCommit, entries):
+    global lastClock, votesForMe, candidate, leader_id, currentTerm, log, commitIndex, votedFor
+    msg = {'src': my_id, 'type': 'ack', 'dst': leaderId, 'leader': leader_id}
+    msg['value'] = True
+    if currentTerm <= term:
+        lastClock = time.time()
         leader_id = leaderId
-    # When it's calling for yooooou
-    if prevLogTermEntries >= currentTerm and candidate:
-        # transition out of the candidate state, if we were in it
-        votesForMe = []
-        candidate = False
-
-    #the leader is behind the follower
-    if term < currentTerm:
-
-        msg['value'] = False
-    else:
-        # terms are the same
-        try:
-            log = log + entries
-            lastApplied = len(log) - 1
-            #
-            # TODO FIX THIS
-            # if log[prevLogIndex][0] != prevLogTermEntries:
-            #     for item in log[prevLogIndex:]:
-            #         sendMessageToClient(item[1], 'fail')
-            #     log = log[:prevLogIndex]
-            #     print log[prevLogIndex][0]
-            msg['value'] = True
-
-            if leaderCommit > commitIndex:
-                commitIndex = min(leaderCommit, lastApplied)
-
-        except IndexError:
-            if lastApplied != -1:
-                msg['value'] = False
-            # the leader is ahead of the follower
-            else:
-                msg['value'] = True
-
-    if term > currentTerm:
         currentTerm = term
+        if candidate:
+            votesForMe = []
+            candidate = False
+            votedFor = (-1, None)
+        if leaderCommit == -1:
+            log = log + entries
+        # smaller log
+        elif lastLog() < prevLogIndex:
+            msg['value'] = False
+        # same entry but different terms
+        elif lastLog() == prevLogIndex and log[prevLogIndex][0] != prevLogTerm:
+            msg['value'] = False
+            # for item in log[prevLogIndex:]:
+            #     print 'FAIL'
+            #     sendMessageToClient(item[1], 'fail')
+            log = log[:prevLogIndex]
+            # log = log + entries
 
-    try:
-        msg['term'] = currentTerm if msg['value'] else log[lastApplied][0]
-    except IndexError:
-        msg['term'] = 0
-    msg['index'] = lastApplied
-    msg['heartbeat'] = len(entries) == 0
+        # bigger log
+        elif lastLog() > prevLogIndex:
+            log = log[:prevLogIndex]
+            log = log + entries
+            followerCommit(leaderCommit)
+        else:
+            log = log + entries
+            followerCommit(leaderCommit)
+    else:
+        currentTerm = term
+        msg['value'] = False
+
+    msg['next_index'] = len(log)
+    msg['term'] = currentTerm
+
     lastClock = time.time()
     sock.send(json.dumps(msg))
 
+def recieveHeartbeat(term, leaderId, leaderCommit):
+    global lastClock, votesForMe, candidate, leader_id, votedFor, currentTerm
+    if currentTerm <= term:
+        lastClock = time.time()
+        leader_id = leaderId
+        if candidate:
+            votesForMe = []
+            candidate = False
+            votedFor = (-1, None)
+        if leaderCommit != -1 and leaderCommit == commitIndex:
+            followerCommit(commitIndex)
+        currentTerm = max(currentTerm, term)
 
-def GetAck(followerId, followerIndex, followerTerm, success, heartbeat):
-    global replicaCommitIndexes
+
+
+def GetAck(followerId, term, success, leaderId, nextFollowerIndex):
+    global currentTerm, leader_id, nextIndex, matchIndex, log, commitIndex, lastApplied, readyToSend
+
+    if term > currentTerm:
+        currentTerm = term
+        leader_id = leaderId
+        return
     if success:
-        replicaCommitIndexes[followerId] = followerIndex
-        if not heartbeat and replicaCommitIndexes.values().count(followerIndex) > len(replicaCommitIndexes) / 2:
-            if followerIndex > lastApplied:
-                print followerIndex
-                print lastApplied
+        nextIndex[followerId] = nextFollowerIndex
+        matchIndex[followerId] = nextFollowerIndex - 1
+        #
+        # print 'commit Index: %s' % commitIndex
+        # print 'match Index for  %s : %s' % (followerId, matchIndex[followerId])
+        # print 'last Log : %s' % (lastLog())
 
-            data = log[followerIndex][1]
-
-            try:
-                if stateMachine[data['key']] != data['value']:
-                    commit(data)
-            except KeyError:
+        if matchIndex[followerId] >= commitIndex + 1 and lastLog() >= commitIndex + 1:
+            readyToSend.append(followerId)
+            if len(readyToSend) >= int(ceil(len(replica_ids) / 2)):
+                readyToSend = []
+                lastApplied += 1
+                commitIndex += 1
+                data = log[lastApplied][1]
                 commit(data)
+
     else:
-        #TODO FIX THIS
-        entries = log[followerIndex:]
-        term = log[followerIndex][0]
-        sendAppendEntries(followerIndex, term, entries=entries, dst=followerId)
+        nextIndex[followerId] = nextFollowerIndex
+        matchIndex[followerId] = nextFollowerIndex - 1
+        sendAppendEntries(dst=followerId)
 
 def RequestVote():
     global lastClock, candidate, votedFor, votesForMe, leader_id
-
-    leader_id = my_id
     candidate = True
     votedFor = my_id
     votesForMe = [my_id]
-    try:
-        lastLogTerm = log[lastApplied][0]
-    except IndexError:
-        lastLogTerm = 0
     message = {'src': my_id,
-                          'leader': leader_id,
+                          'leader': my_id,
                           'type': 'election',
                           'term': currentTerm,
                           'logLength': len(log),
-                          'lastLogTerm': lastLogTerm}
-
+               }
 
     sendToAll(message)
 
 
-def VoteRequested(term, candidateId, logLength, lastLogTerm):
-    global votedFor, leader_id, currentTerm, lastClock
+def validCandidate(term, logLength):
+    try:
+        myLastLogTerm = log[lastLog()][0]
+    except IndexError:
+        myLastLogTerm = 0
+
+    if myLastLogTerm > term:
+        return False
+    elif term > myLastLogTerm:
+        return True
+    else:
+        return lastLog() <= logLength - 1
+
+
+def VoteRequested(term, candidateId, logLength):
+    global votedFor, leader_id, currentTerm, lastClock, votesForMe, candidate
     message = {'src': my_id,
                           'dst': candidateId,
                           'type': 'vote'}
     if term < currentTerm or votedFor[0] > term:
         message['vote'] = False
     else:
-        if votedFor[0] < term or (votedFor[1] == candidateId and votedFor[0] == currentTerm):
+        if my_id == leader_id or candidate:
+            votesForMe = []
+            candidate = False
+            votedFor = (-1, None)
+        if votedFor[0] < term or validCandidate(term, logLength):
             message['vote'] = True
             leader_id = candidateId
             lastClock = time.time()
@@ -227,26 +289,23 @@ def get(msg):
 
 
 def put(msg):
-    global my_id, leader_id, log, stateMachine, lastApplied
+    global my_id, leader_id, log, readyToSend
     if leader_id != my_id:
         sendMessageToClient(msg, 'redirect')
     else:
         # I am the leader!
-        prevLogIndexTerm = 0
-
-        if lastApplied != -1:
-            prevLogIndexTerm = log[lastApplied][0]
-
-        sendAppendEntries(lastApplied, prevLogIndexTerm, entries=[(currentTerm, msg)])
         log.append((currentTerm, msg))
-        lastApplied = len(log) - 1
+        readyToSend.append(my_id)
+        sendAppendEntries()
 
 
 while True:
+
     # Leader
     if leader_id == my_id:
+        # send heartbeat
         if time.time() - lastClock > HEARTBEAT_TIMEOUT:
-            sendAppendEntries(lastApplied, currentTerm, entries=[])
+            sendHeartbeat()
 
     ready = select.select([sock], [], [], 0.1)[0]
 
@@ -261,10 +320,12 @@ while True:
             if msg['type'] == 'vote' and msg['vote'] and msg['src'] not in votesForMe:
                 #  Vote for Pedro!
                 votesForMe.append(msg['src'])
-            if len(votesForMe) >= (len(replica_ids) + 1 / 2):
+            if len(votesForMe) >= (ceil(int(len(replica_ids) / 2))):
+                leader_id = my_id
                 # Look at me. I am the leader now.
                 print '%s has won the election for term %s with votes from %s' % (my_id, currentTerm, votesForMe)
-                sendAppendEntries(lastApplied, currentTerm, entries=[])
+                initialIndexes()
+                sendHeartbeat()
                 candidate = False
                 votesForMe = []
                 continue
@@ -275,11 +336,13 @@ while True:
         elif msg['type'] == 'put':
             put(msg)
         elif msg['type'] == 'election':
-            VoteRequested(msg['term'], msg['src'], msg['logLength'], msg['lastLogTerm'])
+            VoteRequested(msg['term'], msg['src'], msg['logLength'])
         elif msg['type'] == 'append':
-            AppendEntries(msg['term'], msg['src'], msg['prevLogIndex'], msg['prevLogTermEntries'], msg['leaderCommit'], msg['entries'])
+            AppendEntries(msg['term'], msg['src'], msg['prevLogIndex'], msg['prevLogTerm'], msg['leaderCommit'], msg['entries'])
+        elif msg['type'] == 'heartbeat':
+            recieveHeartbeat(msg['term'], msg['src'], msg['leaderCommit'])
         elif msg['type'] == 'ack':
-            GetAck(msg['src'], msg['index'], msg['term'], msg['value'], msg['heartbeat'])
+            GetAck(msg['src'], msg['term'], msg['value'], msg['leader'], msg['next_index'])
 
     if time.time() - lastClock > ELECTION_TIMEOUT and my_id != leader_id:
         # Initiate an election
