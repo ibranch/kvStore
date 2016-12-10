@@ -109,7 +109,7 @@ def sendHeartbeat():
 def sendMessageToClient(data, type):
     global my_id, leader_id
     message = {'src': my_id,
-               'key' : data['key'],
+               'key': data['key'],
                'dst': data['src'],
                'MID': data['MID'],
                'type': type,
@@ -121,7 +121,6 @@ def AppendEntries(term, leaderId, prevLogIndex, prevLogTerm, leaderCommit, entri
     msg = {'src': my_id, 'type': 'ack', 'dst': leaderId, 'leader': leader_id}
     msg['value'] = True
     if currentTerm <= term:
-        lastClock = time.time()
         leader_id = leaderId
         currentTerm = term
         if candidate:
@@ -135,25 +134,22 @@ def AppendEntries(term, leaderId, prevLogIndex, prevLogTerm, leaderCommit, entri
             msg['value'] = False
         # same entry but different terms
         elif lastLog() == prevLogIndex and log[prevLogIndex][0] != prevLogTerm:
-            msg['value'] = False
             # for item in log[prevLogIndex:]:
             #     print 'FAIL'
             #     sendMessageToClient(item[1], 'fail')
             log = log[:prevLogIndex]
-            # log = log + entries
-
+            log = log + entries
         # bigger log
         elif lastLog() > prevLogIndex:
             log = log[:prevLogIndex]
             log = log + entries
-            followerCommit(leaderCommit)
         else:
             log = log + entries
-            followerCommit(leaderCommit)
     else:
         currentTerm = term
         msg['value'] = False
 
+    followerCommit(leaderCommit)
     msg['next_index'] = len(log)
     msg['term'] = currentTerm
 
@@ -169,7 +165,7 @@ def recieveHeartbeat(term, leaderId, leaderCommit):
             votesForMe = []
             candidate = False
             votedFor = (-1, None)
-        if leaderCommit != -1 and leaderCommit == commitIndex:
+        if leaderCommit != -1 and leaderCommit == commitIndex + 1:
             followerCommit(commitIndex)
         currentTerm = max(currentTerm, term)
 
@@ -210,10 +206,10 @@ def RequestVote():
     votedFor = my_id
     votesForMe = [my_id]
     message = {'src': my_id,
-                          'leader': my_id,
-                          'type': 'election',
-                          'term': currentTerm,
-                          'logLength': len(log),
+               'leader': my_id,
+               'type': 'election',
+               'term': currentTerm,
+               'logLength': len(log),
                }
 
     sendToAll(message)
@@ -236,8 +232,8 @@ def validCandidate(term, logLength):
 def VoteRequested(term, candidateId, logLength):
     global votedFor, leader_id, currentTerm, lastClock, votesForMe, candidate
     message = {'src': my_id,
-                          'dst': candidateId,
-                          'type': 'vote'}
+               'dst': candidateId,
+               'type': 'vote'}
     if term < currentTerm or votedFor[0] > term:
         message['vote'] = False
     else:
@@ -270,9 +266,9 @@ def get(msg):
     MID = msg['MID']
     key = msg['key']
     message = {'src': my_id,
-                          'dst': src,
-                          'leader': leader_id,
-                          'MID': MID}
+               'dst': src,
+               'leader': leader_id,
+               'MID': MID}
 
     if leader_id != my_id:
         message['type'] = 'redirect'
