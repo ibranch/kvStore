@@ -26,8 +26,8 @@
       <file leaf-file-name="3700kvstore" pinned="false" current-in-tab="true">
         <entry file="file://$PROJECT_DIR$/3700kvstore">
           <provider selected="true" editor-type-id="text-editor">
-            <state relative-caret-position="-138">
-              <caret line="301" column="16" selection-start-line="301" selection-start-column="16" selection-end-line="301" selection-end-column="16" />
+            <state relative-caret-position="342">
+              <caret line="334" column="18" selection-start-line="334" selection-start-column="18" selection-end-line="334" selection-end-column="18" />
               <folding>
                 <element signature="e#23#75#0" expanded="true" />
               </folding>
@@ -38,8 +38,8 @@
       <file leaf-file-name="3700kvstore" pinned="true" current-in-tab="false">
         <entry file="remoteDeploymentFS://&lt;364b50a5-7dbf-4136-92f4-92e8ea8bcac1&gt;/kvStore/3700kvstore">
           <provider selected="true" editor-type-id="text-editor">
-            <state relative-caret-position="360">
-              <caret line="299" column="12" selection-start-line="0" selection-start-column="0" selection-end-line="347" selection-end-column="0" />
+            <state relative-caret-position="410">
+              <caret line="59" column="22" selection-start-line="0" selection-start-column="0" selection-end-line="352" selection-end-column="0" />
               <folding>
                 <element signature="e#23#75#0" expanded="true" />
               </folding>
@@ -501,8 +501,8 @@
     </entry>
     <entry file="file://$PROJECT_DIR$/3700kvstore">
       <provider selected="true" editor-type-id="text-editor">
-        <state relative-caret-position="-138">
-          <caret line="301" column="16" selection-start-line="301" selection-start-column="16" selection-end-line="301" selection-end-column="16" />
+        <state relative-caret-position="342">
+          <caret line="334" column="18" selection-start-line="334" selection-start-column="18" selection-end-line="334" selection-end-column="18" />
           <folding>
             <element signature="e#23#75#0" expanded="true" />
           </folding>
